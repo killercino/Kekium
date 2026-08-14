@@ -22,9 +22,15 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
-data class Ingredient(val name: String, val quantity: String)
+data class Ingredient(val name: String, val note: String, val group: String)
 data class Dish(val id: Long, val name: String, val ingredients: List<Ingredient>)
-data class ShoppingItem(val id: Long, val name: String, val quantity: String, val bought: Boolean)
+data class Product(val id: Long, val name: String, val note: String, val group: String)
+data class ShoppingItem(val id: Long, val product: Product, val bought: Boolean)
+
+private val groups = listOf(
+    "Fruta y verdura", "Carnicería", "Pescadería", "Huevos y lácteos",
+    "Panadería", "Despensa", "Bebidas", "Limpieza", "Higiene", "Otros"
+)
 
 class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("menu_store", Context.MODE_PRIVATE)
@@ -37,8 +43,13 @@ class AppStore(context: Context) {
             if (p.size != 3) return@mapNotNull null
             val id = p[0].toLongOrNull() ?: return@mapNotNull null
             val ingredients = p[2].split("@@").filter { it.isNotBlank() }.mapNotNull {
-                val x = it.split("|", limit = 2)
-                if (x.isEmpty()) null else Ingredient(x[0], x.getOrElse(1) { "" })
+                val x = it.split("|", limit = 3)
+                val name = x.getOrNull(0)?.trim().orEmpty()
+                if (name.isBlank()) null else Ingredient(
+                    name = name,
+                    note = x.getOrNull(1)?.trim().orEmpty(),
+                    group = x.getOrNull(2)?.trim().orEmpty().ifBlank { "Otros" }
+                )
             }
             Dish(id, p[1], ingredients)
         }
@@ -46,7 +57,7 @@ class AppStore(context: Context) {
 
     fun saveDishes(items: List<Dish>) {
         val raw = items.joinToString("||") { dish ->
-            val ing = dish.ingredients.joinToString("@@") { "${it.name}|${it.quantity}" }
+            val ing = dish.ingredients.joinToString("@@") { "${it.name}|${it.note}|${it.group}" }
             "${dish.id}##${dish.name}##$ing"
         }
         prefs.edit().putString("dishes", raw).apply()
@@ -61,33 +72,53 @@ class AppStore(context: Context) {
         }.apply()
     }
 
+    fun habituals(): List<Product> {
+        val raw = prefs.getString("habituals", "") ?: ""
+        if (raw.isBlank()) return emptyList()
+        return raw.split("||").mapNotNull { record ->
+            val p = record.split("::", limit = 4)
+            if (p.size != 4) return@mapNotNull null
+            val id = p[0].toLongOrNull() ?: return@mapNotNull null
+            Product(id, p[1], p[2], p[3])
+        }
+    }
+
+    fun saveHabituals(items: List<Product>) {
+        val raw = items.joinToString("||") { "${it.id}::${it.name}::${it.note}::${it.group}" }
+        prefs.edit().putString("habituals", raw).apply()
+    }
+
     fun shopping(): List<ShoppingItem> {
         val raw = prefs.getString("shopping", "") ?: ""
         if (raw.isBlank()) return emptyList()
-        return raw.split("||").mapNotNull {
-            val p = it.split("::", limit = 4)
-            if (p.size == 4) ShoppingItem(
-                p[0].toLongOrNull() ?: return@mapNotNull null,
-                p[1], p[2], p[3] == "1"
-            ) else null
+        return raw.split("||").mapNotNull { record ->
+            val p = record.split("::", limit = 5)
+            if (p.size == 5) {
+                val id = p[0].toLongOrNull() ?: return@mapNotNull null
+                ShoppingItem(id, Product(id, p[1], p[2], p[3]), p[4] == "1")
+            } else {
+                // Migration from v1.1/v1.2: old format was id::name::quantity::bought.
+                val old = record.split("::", limit = 4)
+                if (old.size == 4) {
+                    val id = old[0].toLongOrNull() ?: return@mapNotNull null
+                    ShoppingItem(id, Product(id, old[1], old[2], "Otros"), old[3] == "1")
+                } else null
+            }
         }
     }
 
     fun saveShopping(items: List<ShoppingItem>) {
-        prefs.edit().putString(
-            "shopping",
-            items.joinToString("||") {
-                "${it.id}::${it.name}::${it.quantity}::${if (it.bought) "1" else "0"}"
-            }
-        ).apply()
+        val raw = items.joinToString("||") {
+            "${it.id}::${it.product.name}::${it.product.note}::${it.product.group}::${if (it.bought) "1" else "0"}"
+        }
+        prefs.edit().putString("shopping", raw).apply()
     }
 }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val store = AppStore(this)
-        setContent { MenuApp(store) }
+        setContent { MenuApp(AppStore(this)) }
     }
 }
 
@@ -95,7 +126,6 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MenuApp(store: AppStore) {
     var tab by remember { mutableIntStateOf(0) }
-
     MaterialTheme(
         colorScheme = lightColorScheme(
             primary = Color(0xFF4F6354),
@@ -104,19 +134,24 @@ fun MenuApp(store: AppStore) {
     ) {
         Scaffold(
             topBar = {
-                TopAppBar(title = {
-                    Text(if (tab == 0) "Menú semanal" else "Lista de la compra")
-                })
+                TopAppBar(
+                    title = { Text(if (tab == 0) "Menú semanal" else "Lista de la compra") },
+                    modifier = Modifier.height(52.dp)
+                )
             },
             bottomBar = {
-                NavigationBar {
+                NavigationBar(modifier = Modifier.height(68.dp)) {
                     NavigationBarItem(
-                        selected = tab == 0, onClick = { tab = 0 },
-                        icon = { Text("🍽") }, label = { Text("Menú") }
+                        selected = tab == 0,
+                        onClick = { tab = 0 },
+                        icon = { Text("🍽") },
+                        label = { Text("Menú") }
                     )
                     NavigationBarItem(
-                        selected = tab == 1, onClick = { tab = 1 },
-                        icon = { Text("🛒") }, label = { Text("Compra") }
+                        selected = tab == 1,
+                        onClick = { tab = 1 },
+                        icon = { Text("🛒") },
+                        label = { Text("Compra") }
                     )
                 }
             }
@@ -130,87 +165,60 @@ fun MenuApp(store: AppStore) {
 @Composable
 fun MenuScreen(store: AppStore, modifier: Modifier = Modifier) {
     var dishes by remember { mutableStateOf(store.dishes()) }
-    var weekStart by remember {
-        mutableStateOf(LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)))
-    }
+    var weekStart by remember { mutableStateOf(currentWeek()) }
     var showAdd by remember { mutableStateOf(false) }
     var showDishes by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
 
     val locale = Locale("es", "ES")
-    val dayFormatter = DateTimeFormatter.ofPattern("EEEE d", locale)
-    val titleFormatter = DateTimeFormatter.ofPattern("d MMMM", locale)
+    val dayFormatter = DateTimeFormatter.ofPattern("EEE d", locale)
+    val weekFormatter = DateTimeFormatter.ofPattern("d MMM", locale)
 
-    Box(modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { weekStart = weekStart.minusWeeks(1) }) { Text("‹") }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Semana", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        "${weekStart.format(titleFormatter)} – ${weekStart.plusDays(6).format(titleFormatter)}",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                }
-                IconButton(onClick = { weekStart = weekStart.plusWeeks(1) }) { Text("›") }
-            }
+    Column(modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { weekStart = weekStart.minusWeeks(1) }) { Text("‹") }
+            Text(
+                "${weekStart.format(weekFormatter)} – ${weekStart.plusDays(6).format(weekFormatter)}",
+                style = MaterialTheme.typography.titleSmall
+            )
+            IconButton(onClick = { weekStart = weekStart.plusWeeks(1) }) { Text("›") }
+        }
 
-            Button(
-                onClick = {
-                    weekStart = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-                },
-                Modifier.fillMaxWidth()
-            ) { Text("Ir a esta semana") }
-
-            Spacer(Modifier.height(10.dp))
-
-            if (dishes.isEmpty()) {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(20.dp)) {
-                        Text("Añade tus platos", style = MaterialTheme.typography.titleMedium)
-                        Text("Cada plato puede tener ingredientes para generar la compra automáticamente.")
-                    }
-                }
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(bottom = 90.dp)
-                ) {
-                    items((0..6).toList()) { offset ->
-                        val date = weekStart.plusDays(offset.toLong())
-                        val assigned = dishes.find { it.id == store.assignment(date) }
-                        DayCard(
-                            label = date.format(dayFormatter).replaceFirstChar { it.uppercase() },
-                            selected = assigned,
-                            dishes = dishes,
-                            onSelect = { store.setAssignment(date, it?.id) }
-                        )
-                    }
-                }
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+            contentPadding = PaddingValues(bottom = 4.dp)
+        ) {
+            items((0..6).toList()) { offset ->
+                val date = weekStart.plusDays(offset.toLong())
+                val selected = dishes.find { it.id == store.assignment(date) }
+                DayRowCompact(
+                    label = date.format(dayFormatter).replaceFirstChar { it.uppercase() },
+                    selected = selected,
+                    dishes = dishes,
+                    onSelect = { store.setAssignment(date, it?.id) }
+                )
             }
         }
 
         Row(
-            Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            FloatingActionButton(onClick = { showDishes = true }) { Text("☰") }
-            FloatingActionButton(onClick = { showAdd = true }) { Text("+") }
-        }
-
-        message?.let {
-            LaunchedEffect(it) {
-                kotlinx.coroutines.delay(1800)
-                message = null
-            }
-            Snackbar(
-                Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp),
-                action = {}
-            ) { Text(it) }
+            OutlinedButton(
+                onClick = { weekStart = currentWeek() },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+            ) { Text("Esta semana") }
+            OutlinedButton(
+                onClick = { showDishes = true },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+            ) { Text("Platos") }
+            Button(
+                onClick = { showAdd = true },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+            ) { Text("+ Plato") }
         }
     }
 
@@ -218,10 +226,9 @@ fun MenuScreen(store: AppStore, modifier: Modifier = Modifier) {
         AddDishDialog(
             onDismiss = { showAdd = false },
             onAdd = { name, ingredients ->
-                val nextId = (dishes.maxOfOrNull { it.id } ?: 0L) + 1
-                val updated = dishes + Dish(nextId, name.trim(), ingredients)
-                dishes = updated
-                store.saveDishes(updated)
+                val id = (dishes.maxOfOrNull { it.id } ?: 0L) + 1
+                dishes = dishes + Dish(id, name.trim(), ingredients)
+                store.saveDishes(dishes)
                 showAdd = false
             }
         )
@@ -231,34 +238,39 @@ fun MenuScreen(store: AppStore, modifier: Modifier = Modifier) {
         ManageDishesDialog(
             dishes = dishes,
             onDismiss = { showDishes = false },
-            onDelete = {
-                val updated = dishes.filterNot { d -> d.id == it.id }
-                dishes = updated
-                store.saveDishes(updated)
+            onDelete = { dish ->
+                dishes = dishes.filterNot { it.id == dish.id }
+                store.saveDishes(dishes)
             }
         )
     }
 }
 
+fun currentWeek(): LocalDate =
+    LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+
 @Composable
-fun DayCard(
+fun DayRowCompact(
     label: String,
     selected: Dish?,
     dishes: List<Dish>,
     onSelect: (Dish?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp)) {
-            Text(label, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
-            Box {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, Modifier.width(70.dp), style = MaterialTheme.typography.bodySmall)
+            Box(Modifier.weight(1f)) {
                 OutlinedButton(
                     onClick = { expanded = true },
-                    Modifier.fillMaxWidth()
-                ) { Text(selected?.name ?: "Sin asignar") }
-
+                    Modifier.fillMaxWidth().height(40.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
+                    Text(selected?.name ?: "Sin asignar", maxLines = 1)
+                }
                 DropdownMenu(expanded, { expanded = false }) {
                     DropdownMenuItem(
                         text = { Text("Sin asignar") },
@@ -279,81 +291,57 @@ fun DayCard(
 @Composable
 fun AddDishDialog(onDismiss: () -> Unit, onAdd: (String, List<Ingredient>) -> Unit) {
     var name by remember { mutableStateOf("") }
-    var ingredientsText by remember { mutableStateOf("") }
-
+    var lines by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Nuevo plato") },
         text = {
-            Column(
-                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())
-            ) {
-                OutlinedTextField(
-                    value = name, onValueChange = { name = it },
-                    label = { Text("Nombre del plato") },
-                    placeholder = { Text("Ej. Tortilla de patatas") },
-                    singleLine = true
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = ingredientsText,
-                    onValueChange = { ingredientsText = it },
-                    label = { Text("Ingredientes") },
-                    placeholder = { Text("Un ingrediente por línea:\npatatas | 1 kg\nhuevos | 6\naceite | 100 ml") },
-                    minLines = 5
-                )
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                OutlinedTextField(name, { name = it }, label = { Text("Plato") }, singleLine = true)
                 Spacer(Modifier.height(6.dp))
-                Text(
-                    "Escribe: ingrediente | cantidad",
-                    style = MaterialTheme.typography.bodySmall
+                OutlinedTextField(
+                    value = lines,
+                    onValueChange = { lines = it },
+                    label = { Text("Ingredientes opcionales") },
+                    placeholder = { Text("Patatas | 1 kg | Fruta y verdura\nHuevos | 6 | Huevos y lácteos") },
+                    minLines = 4
                 )
+                Spacer(Modifier.height(4.dp))
+                Text("Formato: producto | nota | grupo", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = name.trim().isNotEmpty(),
-                onClick = {
-                    val ingredients = ingredientsText.lines().mapNotNull { line ->
-                        val x = line.split("|", limit = 2)
-                        val n = x.getOrNull(0)?.trim().orEmpty()
-                        if (n.isBlank()) null else Ingredient(n, x.getOrNull(1)?.trim().orEmpty())
-                    }
-                    onAdd(name, ingredients)
+            TextButton(enabled = name.trim().isNotEmpty(), onClick = {
+                val ingredients = lines.lines().mapNotNull { line ->
+                    val p = line.split("|", limit = 3)
+                    val product = p.getOrNull(0)?.trim().orEmpty()
+                    if (product.isBlank()) null else Ingredient(
+                        product,
+                        p.getOrNull(1)?.trim().orEmpty(),
+                        p.getOrNull(2)?.trim().orEmpty().ifBlank { "Otros" }
+                    )
                 }
-            ) { Text("Guardar") }
+                onAdd(name, ingredients)
+            }) { Text("Guardar") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
     )
 }
 
 @Composable
-fun ManageDishesDialog(
-    dishes: List<Dish>,
-    onDismiss: () -> Unit,
-    onDelete: (Dish) -> Unit
-) {
+fun ManageDishesDialog(dishes: List<Dish>, onDismiss: () -> Unit, onDelete: (Dish) -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Mis platos") },
         text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                if (dishes.isEmpty()) Text("No hay platos.")
+            Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                 dishes.forEach { dish ->
-                    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(dish.name, Modifier.weight(1f))
-                            TextButton(onClick = { onDelete(dish) }) { Text("Borrar") }
-                        }
-                        if (dish.ingredients.isNotEmpty()) {
-                            Text(
-                                dish.ingredients.joinToString(", ") {
-                                    if (it.quantity.isBlank()) it.name else "${it.name} (${it.quantity})"
-                                },
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(dish.name, Modifier.weight(1f))
+                        TextButton(onClick = { onDelete(dish) }) { Text("Borrar") }
                     }
                 }
+                if (dishes.isEmpty()) Text("No hay platos.")
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
@@ -363,135 +351,169 @@ fun ManageDishesDialog(
 @Composable
 fun ShoppingScreen(store: AppStore, modifier: Modifier = Modifier) {
     var items by remember { mutableStateOf(store.shopping()) }
-    var dishes by remember { mutableStateOf(store.dishes()) }
-    var weekStart by remember {
-        mutableStateOf(LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)))
-    }
+    var habituals by remember { mutableStateOf(store.habituals()) }
     var showAdd by remember { mutableStateOf(false) }
+    var showHabituals by remember { mutableStateOf(false) }
 
-    fun generateFromWeek() {
-        dishes = store.dishes()
-        val totals = linkedMapOf<String, MutableList<String>>()
-        for (i in 0..6) {
-            val date = weekStart.plusDays(i.toLong())
-            val dish = dishes.find { it.id == store.assignment(date) } ?: continue
-            for (ing in dish.ingredients) {
-                val key = ing.name.trim().lowercase()
-                if (key.isBlank()) continue
-                totals.getOrPut(key) { mutableListOf() }
-                    .add(ing.quantity.trim())
-            }
-        }
+    val ordered = items.sortedWith(
+        compareBy<ShoppingItem> { groupRank(it.product.group) }
+            .thenBy { it.product.name.lowercase() }
+    )
 
-        val generated = totals.entries.mapIndexed { index, (name, quantities) ->
-            ShoppingItem(
-                id = 1_000_000L + index,
-                name = name.replaceFirstChar { it.uppercase() },
-                quantity = quantities.filter { it.isNotBlank() }.joinToString(" + "),
-                bought = false
-            )
-        }
-
-        val manual = items.filter { it.id < 1_000_000L }
-        items = manual + generated
-        store.saveShopping(items)
-    }
-
-    Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Spacer(Modifier.height(10.dp))
-
+    Column(modifier.fillMaxSize().padding(horizontal = 8.dp)) {
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            IconButton(onClick = { weekStart = weekStart.minusWeeks(1) }) { Text("‹") }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Compra de la semana", style = MaterialTheme.typography.labelMedium)
-                Text(weekStart.format(DateTimeFormatter.ofPattern("d MMM", Locale("es", "ES"))))
-            }
-            IconButton(onClick = { weekStart = weekStart.plusWeeks(1) }) { Text("›") }
+            Button(
+                onClick = { showAdd = true },
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 5.dp)
+            ) { Text("+ Producto") }
+            OutlinedButton(
+                onClick = { showHabituals = true },
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 5.dp)
+            ) { Text("Habituales") }
+            OutlinedButton(
+                onClick = {
+                    val existing = items.map { "${it.product.name.lowercase()}|${it.product.group.lowercase()}" }.toSet()
+                    val additions = habituals.filter { "${it.name.lowercase()}|${it.group.lowercase()}" !in existing }
+                        .mapIndexed { index, product ->
+                            ShoppingItem((items.maxOfOrNull { it.id } ?: 0L) + index + 1, product, false)
+                        }
+                    items = items + additions
+                    store.saveShopping(items)
+                },
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 5.dp)
+            ) { Text("Generar lista") }
         }
 
-        Button(onClick = { generateFromWeek() }, Modifier.fillMaxWidth()) {
-            Text("Generar compra desde el menú")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        if (items.isEmpty()) {
+        if (ordered.isEmpty()) {
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(20.dp)) {
+                Column(Modifier.padding(12.dp)) {
                     Text("Lista vacía", style = MaterialTheme.typography.titleMedium)
-                    Text("Puedes añadir productos manualmente o generarlos desde el menú.")
+                    Text("Añade productos o crea tus habituales.", style = MaterialTheme.typography.bodySmall)
                 }
             }
         } else {
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(bottom = 90.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                contentPadding = PaddingValues(bottom = 8.dp)
             ) {
-                items(items, key = { it.id }) { item ->
-                    ShoppingRow(
-                        item,
-                        onToggle = {
-                            items = items.map { if (it.id == item.id) it.copy(bought = !it.bought) else it }
-                            store.saveShopping(items)
-                        },
-                        onDelete = {
-                            items = items.filterNot { it.id == item.id }
-                            store.saveShopping(items)
+                groups.forEach { group ->
+                    val groupItems = ordered.filter { it.product.group == group }
+                    if (groupItems.isNotEmpty()) {
+                        item {
+                            Text(
+                                group,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(top = 4.dp, bottom = 1.dp)
+                            )
                         }
-                    )
+                        items(groupItems, key = { it.id }) { item ->
+                            ShoppingRowCompact(
+                                item = item,
+                                onToggle = {
+                                    items = items.map { if (it.id == item.id) it.copy(bought = !it.bought) else it }
+                                    store.saveShopping(items)
+                                },
+                                onDelete = {
+                                    items = items.filterNot { it.id == item.id }
+                                    store.saveShopping(items)
+                                }
+                            )
+                        }
+                    }
+                }
+                val unknown = ordered.filter { it.product.group !in groups }
+                if (unknown.isNotEmpty()) {
+                    item { Text("Otros", style = MaterialTheme.typography.labelMedium) }
+                    items(unknown, key = { it.id }) { item ->
+                        ShoppingRowCompact(
+                            item = item,
+                            onToggle = {
+                                items = items.map { if (it.id == item.id) it.copy(bought = !it.bought) else it }
+                                store.saveShopping(items)
+                            },
+                            onDelete = {
+                                items = items.filterNot { it.id == item.id }
+                                store.saveShopping(items)
+                            }
+                        )
+                    }
                 }
             }
         }
     }
 
-    Box(modifier.fillMaxSize()) {
-        FloatingActionButton(
-            onClick = { showAdd = true },
-            Modifier.align(Alignment.BottomEnd).padding(16.dp)
-        ) { Text("+") }
-    }
-
     if (showAdd) {
-        AddShoppingDialog(
+        AddProductDialog(
             onDismiss = { showAdd = false },
-            onAdd = { name, quantity ->
-                val nextId = (items.filter { it.id < 1_000_000L }.maxOfOrNull { it.id } ?: 0L) + 1
-                items = items + ShoppingItem(nextId, name.trim(), quantity.trim(), false)
+            onAdd = { name, note, group, habitual ->
+                val productId = (habituals.maxOfOrNull { it.id } ?: 0L) + 1
+                if (habitual) {
+                    val product = Product(productId, name.trim(), note.trim(), group)
+                    habituals = habituals + product
+                    store.saveHabituals(habituals)
+                }
+                val shoppingId = (items.maxOfOrNull { it.id } ?: 0L) + 1
+                items = items + ShoppingItem(shoppingId, Product(shoppingId, name.trim(), note.trim(), group), false)
                 store.saveShopping(items)
                 showAdd = false
             }
         )
     }
+
+    if (showHabituals) {
+        HabitualsDialog(
+            items = habituals,
+            onDismiss = { showHabituals = false },
+            onDelete = { product ->
+                habituals = habituals.filterNot { it.id == product.id }
+                store.saveHabituals(habituals)
+            }
+        )
+    }
 }
 
+fun groupRank(group: String): Int = groups.indexOf(group).let { if (it < 0) groups.lastIndex else it }
+
 @Composable
-fun ShoppingRow(item: ShoppingItem, onToggle: () -> Unit, onDelete: () -> Unit) {
+fun ShoppingRowCompact(item: ShoppingItem, onToggle: () -> Unit, onDelete: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            Modifier.padding(horizontal = 4.dp, vertical = 0.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Checkbox(item.bought, { onToggle() })
-            Column(Modifier.weight(1f)) {
+            Checkbox(
+                checked = item.bought,
+                onCheckedChange = { onToggle() },
+                modifier = Modifier.size(34.dp)
+            )
+            Column(Modifier.weight(1f).padding(start = 4.dp)) {
                 Text(
-                    item.name,
+                    item.product.name,
+                    style = MaterialTheme.typography.bodySmall,
                     textDecoration = if (item.bought) TextDecoration.LineThrough else TextDecoration.None
                 )
-                if (item.quantity.isNotBlank()) Text(item.quantity, style = MaterialTheme.typography.bodySmall)
+                if (item.product.note.isNotBlank()) {
+                    Text(item.product.note, style = MaterialTheme.typography.labelSmall)
+                }
             }
-            TextButton(onClick = onDelete) { Text("Borrar") }
+            TextButton(
+                onClick = onDelete,
+                contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp)
+            ) { Text("×") }
         }
     }
 }
 
 @Composable
-fun AddShoppingDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+fun AddProductDialog(onDismiss: () -> Unit, onAdd: (String, String, String, Boolean) -> Unit) {
     var name by remember { mutableStateOf("") }
-    var quantity by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
+    var group by remember { mutableStateOf("Otros") }
+    var habitual by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -499,15 +521,51 @@ fun AddShoppingDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
         text = {
             Column {
                 OutlinedTextField(name, { name = it }, label = { Text("Producto") }, singleLine = true)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(quantity, { quantity = it }, label = { Text("Cantidad") }, singleLine = true)
+                Spacer(Modifier.height(5.dp))
+                OutlinedTextField(note, { note = it }, label = { Text("Nota (opcional)") }, singleLine = true)
+                Spacer(Modifier.height(5.dp))
+                Box {
+                    OutlinedButton(onClick = { expanded = true }) { Text(group) }
+                    DropdownMenu(expanded, { expanded = false }) {
+                        groups.forEach { g ->
+                            DropdownMenuItem(text = { Text(g) }, onClick = { group = g; expanded = false })
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = habitual, onCheckedChange = { habitual = it })
+                    Text("Guardar como habitual")
+                }
             }
         },
         confirmButton = {
-            TextButton(enabled = name.trim().isNotEmpty(), onClick = { onAdd(name, quantity) }) {
+            TextButton(enabled = name.trim().isNotEmpty(), onClick = { onAdd(name, note, group, habitual) }) {
                 Text("Añadir")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+@Composable
+fun HabitualsDialog(items: List<Product>, onDismiss: () -> Unit, onDelete: (Product) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Productos habituales") },
+        text = {
+            Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                if (items.isEmpty()) Text("No tienes productos habituales.")
+                items.forEach { product ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(product.name)
+                            Text(product.group, style = MaterialTheme.typography.labelSmall)
+                        }
+                        TextButton(onClick = { onDelete(product) }) { Text("Borrar") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
     )
 }
