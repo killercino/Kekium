@@ -278,6 +278,18 @@ fun MenuScreen(
             )
         )
     }
+
+    // Mantener las asignaciones en memoria evita leer SharedPreferences
+    // repetidamente durante cada recomposición de la lista.
+    var assignments by remember {
+        mutableStateOf(
+            (0..6).associate { offset ->
+                val date = weekStart.plusDays(offset.toLong())
+                date to store.assignment(date)
+            }
+        )
+    }
+
     var showAdd by remember { mutableStateOf(false) }
     var showDishes by remember { mutableStateOf(false) }
 
@@ -296,7 +308,14 @@ fun MenuScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = { weekStart = weekStart.minusWeeks(1) },
+                onClick = {
+                    val newStart = weekStart.minusWeeks(1)
+                    weekStart = newStart
+                    assignments = (0..6).associate { offset ->
+                        val date = newStart.plusDays(offset.toLong())
+                        date to store.assignment(date)
+                    }
+                },
                 modifier = Modifier.size(38.dp)
             ) {
                 Text("‹", style = MaterialTheme.typography.titleLarge)
@@ -313,7 +332,14 @@ fun MenuScreen(
             }
 
             IconButton(
-                onClick = { weekStart = weekStart.plusWeeks(1) },
+                onClick = {
+                    val newStart = weekStart.plusWeeks(1)
+                    weekStart = newStart
+                    assignments = (0..6).associate { offset ->
+                        val date = newStart.plusDays(offset.toLong())
+                        date to store.assignment(date)
+                    }
+                },
                 modifier = Modifier.size(38.dp)
             ) {
                 Text("›", style = MaterialTheme.typography.titleLarge)
@@ -325,9 +351,10 @@ fun MenuScreen(
             verticalArrangement = Arrangement.spacedBy(3.dp),
             contentPadding = PaddingValues(bottom = 4.dp)
         ) {
-            items((0..6).toList()) { offset ->
+            items((0..6).toList(), key = { it }) { offset ->
                 val date = weekStart.plusDays(offset.toLong())
-                val assigned = dishes.find { it.id == store.assignment(date) }
+                val assignedId = assignments[date]
+                val assigned = dishes.find { it.id == assignedId }
 
                 CompactDayRow(
                     label = date
@@ -336,6 +363,11 @@ fun MenuScreen(
                     selected = assigned,
                     dishes = dishes,
                     onSelect = { dish ->
+                        // Actualización inmediata de la interfaz.
+                        // La escritura en disco se hace una sola vez.
+                        assignments = assignments.toMutableMap().apply {
+                            this[date] = dish?.id
+                        }
                         store.setAssignment(date, dish?.id)
                     }
                 )
@@ -350,9 +382,14 @@ fun MenuScreen(
         ) {
             OutlinedButton(
                 onClick = {
-                    weekStart = LocalDate.now().with(
+                    val newStart = LocalDate.now().with(
                         TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)
                     )
+                    weekStart = newStart
+                    assignments = (0..6).associate { offset ->
+                        val date = newStart.plusDays(offset.toLong())
+                        date to store.assignment(date)
+                    }
                 },
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
             ) {
@@ -1307,3 +1344,4 @@ fun AddShoppingDialog(
         }
     )
 }
+
